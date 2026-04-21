@@ -88,11 +88,12 @@ cp .env.example .env
 | `JWT_ACCESS_SECRET` | Yes | — | Must match identity-service exactly |
 | `FEED_SESSION_TTL_HOURS` | No | `24` | Feed session lifetime in hours |
 | `FEED_PAGE_SIZE` | No | `20` | Default items per page |
+| `RABBITMQ_URL` | No | `amqp://guest:guest@localhost:5672` | RabbitMQ AMQP URL |
 
-### 2. Start the database
+### 2. Start dependencies
 
 ```bash
-docker compose up postgres -d
+docker compose up postgres rabbitmq -d
 ```
 
 ### 3. Run migrations
@@ -138,7 +139,7 @@ All endpoints are prefixed with `/api/v1` and require a Bearer JWT (`Authorizati
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/api/v1/health` | Public | Health check |
-| `GET` | `/api/v1/feed` | JWT | Get ranked feed page |
+| `GET` | `/api/v1/feed` | JWT | Get ranked feed page (includes `isLiked` per item) |
 | `POST` | `/api/v1/feed/events/impression` | JWT | Record video impressions |
 | `POST` | `/api/v1/feed/events/watch` | JWT | Record watch event |
 | `POST` | `/api/v1/feed/events/like` | JWT | Like a video |
@@ -160,12 +161,27 @@ Response `200`:
 ```json
 {
   "items": [
-    { "videoId": "uuid", "position": 0, "score": 0.9200 }
+    { "videoId": "uuid", "position": 0, "score": 0.9200, "isLiked": true }
   ],
   "nextCursor": "eyJzIjoiLi4uIiwicCI6MTl9",
   "sessionId": "uuid"
 }
 ```
+
+`isLiked` reflects whether the requesting user has previously liked that video. Clients should use this to initialise like state without a separate request.
+
+---
+
+## RabbitMQ consumers
+
+Exchange: `scroller.topic` (topic exchange)
+
+| Queue | Routing key | Source | Action |
+|---|---|---|---|
+| `feed.video.published` | `video.published` | content-service | Upsert `VideoTopicIndex` rows for topic-filtered feeds |
+| `feed.video.deleted` | `video.deleted` | content-service | Purge `VideoTopicIndex`, `DailyVideoCounter`, and `FeedImpression` rows for that video |
+
+Both consumers are idempotent — safe to redeliver. Failed messages are routed to `scroller.dlx` (dead-letter exchange).
 
 ---
 
