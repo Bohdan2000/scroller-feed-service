@@ -1,0 +1,123 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Tracks a user's feed session — used for deduplication across pages
+model FeedSession {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  impressions FeedImpression[]
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("feed_sessions")
+}
+
+// Records each video shown to a user in a feed session
+model FeedImpression {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  userId    String   @map("user_id")
+  videoId   String   @map("video_id")
+  position  Int      // position in the feed (0-indexed)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session FeedSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, videoId])
+  @@index([userId])
+  @@index([videoId])
+  @@map("feed_impressions")
+}
+
+// Tracks how much of a video a user watched
+model WatchEvent {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  videoId        String   @map("video_id")
+  watchedSec     Int      @map("watched_sec")
+  durationSec    Int      @map("duration_sec")
+  completionRate Float    @map("completion_rate") // watchedSec / durationSec, clamped 0–1
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([videoId])
+  @@map("watch_events")
+}
+
+// One row per user per video — upserted on like/unlike
+model VideoLike {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  videoId   String   @map("video_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, videoId])
+  @@index([videoId])
+  @@map("video_likes")
+}
+
+// Each row is one share event (not unique — same user can share multiple times)
+model VideoShare {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  videoId   String   @map("video_id")
+  platform  String? // e.g. "instagram", "whatsapp", "copy_link"
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([videoId])
+  @@map("video_shares")
+}
+
+// Rolling daily counters per video — denormalised for fast feed ranking
+model DailyVideoCounter {
+  id           String   @id @default(uuid())
+  videoId      String   @map("video_id")
+  date         DateTime @db.Date @map("date")
+  views        Int      @default(0)
+  likes        Int      @default(0)
+  shares       Int      @default(0)
+  watchTimeSec Int      @default(0) @map("watch_time_sec")
+
+  @@unique([videoId, date])
+  @@index([videoId])
+  @@index([date])
+  @@map("daily_video_counters")
+}
+
+// Local index of published videos + their topic associations.
+// Populated from `video.published` RabbitMQ events (content-service → feed-service).
+// Used to filter candidates by topic in getFeed().
+model VideoTopicIndex {
+  id           String   @id @default(uuid())
+  videoId      String   @map("video_id")
+  topicId      String   @map("topic_id")
+  authorUserId String   @map("author_user_id")
+  publishedAt  DateTime @map("published_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([videoId, topicId])
+  @@index([topicId])
+  @@index([videoId])
+  @@map("video_topic_index")
+}
+
+// Per-user feed state — stores cursor for next page and global seen set TTL
+model UserFeedState {
+  id            String   @id @default(uuid())
+  userId        String   @unique @map("user_id")
+  lastSessionId String?  @map("last_session_id")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("user_feed_state")
+}

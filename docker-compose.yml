@@ -1,0 +1,70 @@
+services:
+
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: feed_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-feed}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-feed_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-feed_service}
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-feed} -d ${POSTGRES_DB:-feed_service}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─── RabbitMQ ────────────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: feed_rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─── Feed Service ─────────────────────────────────────────────────────────
+  feed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: feed_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT:-3004}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-feed}:${POSTGRES_PASSWORD:-feed_secret}@postgres:5432/${POSTGRES_DB:-feed_service}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      FEED_SESSION_TTL_HOURS: ${FEED_SESSION_TTL_HOURS:-24}
+      FEED_PAGE_SIZE: ${FEED_PAGE_SIZE:-20}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
+    ports:
+      - "${PORT:-3004}:3004"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/api/v1/health 2>/dev/null || exit 0"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  postgres_data:
