@@ -112,6 +112,20 @@ model VideoTopicIndex {
   @@map("video_topic_index")
 }
 
+// Local copy of user topic preferences, synced from social-service via user.topics.updated events.
+// Used to filter the cold-start feed to content in the user's areas of interest.
+model UserTopicPreference {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  topicId   String   @map("topic_id")
+  weight    Float    @default(1.0)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, topicId])
+  @@index([userId])
+  @@map("user_topic_preferences")
+}
+
 // Per-user feed state — stores cursor for next page and global seen set TTL
 model UserFeedState {
   id            String   @id @default(uuid())

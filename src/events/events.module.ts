@@ -4,6 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { SCROLLER_DLX, SCROLLER_EXCHANGE } from './events.constants';
 import { VideoPublishedConsumer } from './video-published.consumer';
 import { VideoDeletedConsumer } from './video-deleted.consumer';
+import { UserTopicsUpdatedConsumer } from './user-topics-updated.consumer';
 import { PrismaModule } from '../prisma/prisma.module';
 
 @Module({
@@ -22,6 +23,6 @@ import { PrismaModule } from '../prisma/prisma.module';
     }),
     PrismaModule,
   ],
-  providers: [VideoPublishedConsumer, VideoDeletedConsumer],
+  providers: [VideoPublishedConsumer, VideoDeletedConsumer, UserTopicsUpdatedConsumer],
 })
 export class EventsModule {}

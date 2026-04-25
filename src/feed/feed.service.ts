@@ -108,50 +108,58 @@ export class FeedService {
     // ── Step 4: Load seen videoIds ────────────────────────────────────────────
     const seenVideoIds = await this.getSeenVideoIds(sessionId);
 
-    // ── Step 5: Query DailyVideoCounters for the last 2 days ─────────────────
+    // ── Step 5: Query DailyVideoCounters and aggregate by videoId ────────────
     // TODO: Replace this naive counter-based candidate selection with a proper
     // recommendation engine (e.g. two-tower model, collaborative filtering).
+    //
+    // We try a 7-day window first. If that yields nothing (e.g. dev environment
+    // with stale data), we expand to 30 days. Rows are aggregated by videoId so
+    // a video with multiple daily rows is treated as a single ranked candidate.
     const today = this.getUtcDateKey();
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
 
-    const counters = await this.prisma.dailyVideoCounter.findMany({
-      where: {
-        date: { gte: yesterday },
-      },
-      orderBy: [
-        // Placeholder pre-sort: likes*3 + shares*5 + views cannot be expressed
-        // directly in Prisma orderBy, so we sort by likes desc as a proxy and
-        // rely on RankingService for the real ordering.
-        { likes: 'desc' },
-        { shares: 'desc' },
-        { views: 'desc' },
-      ],
-      // Fetch a larger pool to have enough after deduplication
-      take: (limit + seenVideoIds.size) * 5 + 100,
-    });
+    const poolSize = (limit + seenVideoIds.size) * 5 + 100;
+    const counters =
+      (await this.fetchAggregatedCounters(today, 7, poolSize)) ??
+      (await this.fetchAggregatedCounters(today, 30, poolSize)) ??
+      [];
 
     // ── Step 6: De-duplicate (filter out already-seen videos) ─────────────────
     const unseenCounters = counters.filter((c) => !seenVideoIds.has(c.videoId));
 
     // ── Step 7: Topic filter via local VideoTopicIndex ────────────────────────
     // The index is populated by the video-published.consumer from RabbitMQ events.
+    // On cold-start (user has zero impressions) we auto-apply their onboarding
+    // topic preferences so they see high-engagement content in their interests.
     let topicFilteredCounters = unseenCounters;
     const videoTopicMap = new Map<string, { topicIds: string[]; publishedAt: Date | undefined }>();
 
-    if (query.topicIds && query.topicIds.length > 0) {
+    // Resolve which topic IDs to filter by:
+    // 1. Explicit query param overrides everything.
+    // 2. If absent and user has no impressions yet, use their saved preferences.
+    let effectiveTopicIds = query.topicIds ?? [];
+    if (effectiveTopicIds.length === 0 && unseenCounters.length > 0) {
+      const coldStart = await this.isColdStart(userId);
+      if (coldStart) {
+        effectiveTopicIds = await this.getUserTopicIds(userId);
+      }
+    }
+
+    if (effectiveTopicIds.length > 0) {
       // Load topic index rows for the candidate videoIds that match the requested topics
       const candidateVideoIds = unseenCounters.map((c) => c.videoId);
       const topicIndexRows = await this.prisma.videoTopicIndex.findMany({
         where: {
           videoId: { in: candidateVideoIds },
-          topicId: { in: query.topicIds },
+          topicId: { in: effectiveTopicIds },
         },
         select: { videoId: true, topicId: true, publishedAt: true },
       });
 
       const matchedVideoIds = new Set(topicIndexRows.map((r) => r.videoId));
-      topicFilteredCounters = unseenCounters.filter((c) => matchedVideoIds.has(c.videoId));
+      const filtered = unseenCounters.filter((c) => matchedVideoIds.has(c.videoId));
+
+      // Fall back to unfiltered if topic filter yields nothing (e.g. sparse index)
+      topicFilteredCounters = filtered.length > 0 ? filtered : unseenCounters;
 
       // Build a map of videoId → { topicIds, publishedAt } for the ranking step
       for (const row of topicIndexRows) {
@@ -190,20 +198,44 @@ export class FeedService {
 
     // ── Step 10: Check which page videos the user has already liked ───────────
     const pageVideoIds = page.map((v) => v.videoId);
-    const likedRows = await this.prisma.videoLike.findMany({
-      where: { userId, videoId: { in: pageVideoIds } },
-      select: { videoId: true },
-    });
+    const [likedRows, allTimeCounters] = await Promise.all([
+      this.prisma.videoLike.findMany({
+        where: { userId, videoId: { in: pageVideoIds } },
+        select: { videoId: true },
+      }),
+      // All-time aggregated likes + shares (no date filter) for the page videos
+      this.prisma.dailyVideoCounter.findMany({
+        where: { videoId: { in: pageVideoIds } },
+        select: { videoId: true, likes: true, shares: true },
+      }),
+    ]);
+
     const likedSet = new Set(likedRows.map((r) => r.videoId));
+
+    const statsMap = new Map<string, { likes: number; shares: number }>();
+    for (const row of allTimeCounters) {
+      const e = statsMap.get(row.videoId);
+      if (e) {
+        e.likes += row.likes;
+        e.shares += row.shares;
+      } else {
+        statsMap.set(row.videoId, { likes: row.likes, shares: row.shares });
+      }
+    }
 
     // ── Step 11: Build response ───────────────────────────────────────────────
     const startPosition = lastPosition + 1;
-    const items: FeedItemDto[] = page.map((v, idx) => ({
-      videoId: v.videoId,
-      position: startPosition + idx,
-      score: Math.round(v.score * 10000) / 10000,
-      isLiked: likedSet.has(v.videoId),
-    }));
+    const items: FeedItemDto[] = page.map((v, idx) => {
+      const stats = statsMap.get(v.videoId);
+      return {
+        videoId: v.videoId,
+        position: startPosition + idx,
+        score: Math.round(v.score * 10000) / 10000,
+        isLiked: likedSet.has(v.videoId),
+        likesCount: Math.max(0, stats?.likes ?? 0),
+        sharesCount: Math.max(0, stats?.shares ?? 0),
+      };
+    });
 
     const nextCursor =
       page.length < limit
@@ -465,6 +497,65 @@ export class FeedService {
    */
   private getUtcDateKey(): Date {
     return new Date(new Date().toISOString().split('T')[0]);
+  }
+
+  /**
+   * Query DailyVideoCounter for the given window and return one aggregated row
+   * per videoId (summing views/likes/shares/watchTimeSec across days).
+   * Returns null if no rows exist in that window so the caller can try wider.
+   */
+  private async fetchAggregatedCounters(
+    today: Date,
+    windowDays: number,
+    take: number,
+  ): Promise<Array<{ videoId: string; views: number; likes: number; shares: number; watchTimeSec: number }> | null> {
+    const windowStart = new Date(today);
+    windowStart.setDate(windowStart.getDate() - windowDays);
+
+    const rows = await this.prisma.dailyVideoCounter.findMany({
+      where: { date: { gte: windowStart } },
+      select: { videoId: true, views: true, likes: true, shares: true, watchTimeSec: true },
+      take: take * 3, // over-fetch to account for multi-day rows per video
+    });
+
+    if (rows.length === 0) return null;
+
+    const agg = new Map<string, { videoId: string; views: number; likes: number; shares: number; watchTimeSec: number }>();
+    for (const row of rows) {
+      const e = agg.get(row.videoId);
+      if (e) {
+        e.views += row.views;
+        e.likes += row.likes;
+        e.shares += row.shares;
+        e.watchTimeSec += row.watchTimeSec;
+      } else {
+        agg.set(row.videoId, { videoId: row.videoId, views: row.views, likes: row.likes, shares: row.shares, watchTimeSec: row.watchTimeSec });
+      }
+    }
+
+    // Trim to requested take after aggregation
+    return Array.from(agg.values()).slice(0, take);
+  }
+
+  /**
+   * Returns true if the user has never had a video impression recorded.
+   * Used to detect cold-start so we can apply topic preferences automatically.
+   */
+  private async isColdStart(userId: string): Promise<boolean> {
+    const count = await this.prisma.feedImpression.count({ where: { userId } });
+    return count === 0;
+  }
+
+  /**
+   * Returns the topicIds from the user's locally-synced topic preferences.
+   * Preferences are populated by the user.topics.updated RabbitMQ consumer.
+   */
+  private async getUserTopicIds(userId: string): Promise<string[]> {
+    const prefs = await this.prisma.userTopicPreference.findMany({
+      where: { userId },
+      select: { topicId: true },
+    });
+    return prefs.map((p) => p.topicId);
   }
 
   /**

@@ -31,6 +31,18 @@ export class FeedItemDto {
     example: false,
   })
   isLiked: boolean;
+
+  @ApiProperty({
+    description: 'All-time total like count for this video.',
+    example: 142,
+  })
+  likesCount: number;
+
+  @ApiProperty({
+    description: 'All-time total share count for this video.',
+    example: 37,
+  })
+  sharesCount: number;
 }
 
 export class FeedResponseDto {
