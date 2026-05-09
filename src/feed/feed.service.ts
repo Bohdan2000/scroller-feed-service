@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AmqpConnection } from '@golevelup/nestjs-rabbitmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { SCROLLER_EXCHANGE, RoutingKeys } from '../events/events.constants';
 import {
   FeedSessionNotFoundException,
   InvalidCursorException,
@@ -37,6 +39,7 @@ export class FeedService {
     private readonly prisma: PrismaService,
     private readonly rankingService: RankingService,
     private readonly config: ConfigService,
+    private readonly amqp: AmqpConnection,
   ) {}
 
   // ─── GET /feed ─────────────────────────────────────────────────────────────
@@ -324,7 +327,11 @@ export class FeedService {
     await this.prisma.videoLike.create({ data: { userId, videoId } });
     await this.upsertDailyCounter(videoId, { likes: 1 });
 
-    this.emitEvent('video.liked', { videoId, userId });
+    void this.emitEvent(RoutingKeys.VIDEO_LIKED, {
+      videoId,
+      videoOwnerId: dto.videoOwnerId,
+      actorId: userId,
+    });
   }
 
   // ─── DELETE /feed/events/like/:videoId ────────────────────────────────────
@@ -366,7 +373,7 @@ export class FeedService {
       },
     });
 
-    this.emitEvent('video.unliked', { videoId, userId });
+    void this.emitEvent('video.unliked', { videoId, userId });
   }
 
   // ─── POST /feed/events/share ───────────────────────────────────────────────
@@ -386,7 +393,7 @@ export class FeedService {
 
     await this.upsertDailyCounter(videoId, { shares: 1 });
 
-    this.emitEvent('video.shared', { videoId, userId, platform: platform ?? null });
+    void this.emitEvent('video.shared', { videoId, userId, platform: platform ?? null });
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────
@@ -567,8 +574,12 @@ export class FeedService {
    * Exchange: feed.events
    * Routing key: <event>  (e.g. "video.liked", "video.shared")
    */
-  private emitEvent(event: string, payload: Record<string, unknown>): void {
-    // TODO: publish to RabbitMQ exchange `feed.events` with routing key `event`
-    this.logger.debug(`Event emitted [${event}]: ${JSON.stringify(payload)}`);
+  private async emitEvent(routingKey: string, payload: Record<string, unknown>): Promise<void> {
+    try {
+      await this.amqp.publish(SCROLLER_EXCHANGE, routingKey, payload);
+      this.logger.debug(`[EVENT] ${routingKey}: ${JSON.stringify(payload)}`);
+    } catch (err) {
+      this.logger.error(`Failed to publish event ${routingKey}: ${(err as Error).message}`);
+    }
   }
 }

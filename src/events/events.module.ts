@@ -24,5 +24,6 @@ import { PrismaModule } from '../prisma/prisma.module';
     PrismaModule,
   ],
   providers: [VideoPublishedConsumer, VideoDeletedConsumer, UserTopicsUpdatedConsumer],
+  exports: [RabbitMQModule],
 })
 export class EventsModule {}

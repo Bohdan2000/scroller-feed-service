@@ -8,7 +8,8 @@ export const Queues = {
 } as const;
 
 export const RoutingKeys = {
-  VIDEO_PUBLISHED: 'video.published',
-  VIDEO_DELETED: 'video.deleted',
+  VIDEO_PUBLISHED:     'video.published',
+  VIDEO_DELETED:       'video.deleted',
   USER_TOPICS_UPDATED: 'user.topics.updated',
+  VIDEO_LIKED:         'video.liked',
 } as const;

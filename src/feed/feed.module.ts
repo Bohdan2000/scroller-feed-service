@@ -2,8 +2,10 @@ import { Module } from '@nestjs/common';
 import { FeedController } from './feed.controller';
 import { FeedService } from './feed.service';
 import { RankingService } from './ranking.service';
+import { EventsModule } from '../events/events.module';
 
 @Module({
+  imports: [EventsModule],
   controllers: [FeedController],
   providers: [FeedService, RankingService],
 })
